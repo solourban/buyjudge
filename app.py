@@ -87,7 +87,7 @@ def action_text(row: pd.Series) -> str:
     verdict = str(row.get("final_verdict", ""))
     symbol = str(row.get("symbol", ""))
     if verdict == "매수후보":
-        return "지금 가격대에서 검토 가능. 단, 분할매수와 손절 기준은 반드시 같이 봐야 함."
+        return "현재가 기준 조건 통과. 단, 몰빵 금지. 분할매수·손절가를 같이 봐야 함."
     if verdict == "눌림대기":
         return f"현재가 추격금지. {price_fmt(row.get('pullback_entry'), symbol)} 부근까지 눌리면 다시 관심."
     if verdict == "조건부관망":
@@ -131,7 +131,8 @@ def render_card(row: pd.Series) -> None:
     p3.metric("목표가", price_fmt(row.get("target"), symbol))
     p4.metric("거래대금 20일비", f"{n(row.get('trading_value_ratio20')):.2f}배")
 
-    if verdict == "눌림대기" or n(row.get("pullback_entry")) > 0:
+    # 매수후보 카드에는 눌림 진입가를 숨긴다. 같이 보이면 '지금 가능'과 '눌림대기'가 섞여 헷갈린다.
+    if verdict == "눌림대기":
         q1, q2, q3 = st.columns(3)
         q1.metric("눌림 진입가", price_fmt(row.get("pullback_entry"), symbol))
         q2.metric("눌림 손익비", f"{n(row.get('pullback_rr')):.2f}")
