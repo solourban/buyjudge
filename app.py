@@ -106,6 +106,68 @@ def load_chart_data(symbol: str, period: str) -> pd.DataFrame:
     return df.tail(180)
 
 
+def add_expected_path(fig: go.Figure, row: pd.Series, df: pd.DataFrame) -> None:
+    """현재 유사사례 통계로 20거래일 예상 경로 밴드를 그린다."""
+    if df.empty:
+        return
+
+    last_date = df.index[-1]
+    base_price = n(row.get("close")) or n(df["close"].iloc[-1])
+    avg_ret = n(row.get("avg_ret20"))
+    avg_up = n(row.get("avg_max_up20"))
+    avg_down = n(row.get("avg_max_down20"))
+    case_count = int(n(row.get("similar_case_count")))
+
+    if base_price <= 0 or case_count <= 0:
+        return
+
+    future_dates = pd.bdate_range(last_date, periods=22)[1:]
+    if len(future_dates) == 0:
+        return
+
+    end_date = future_dates[-1]
+    expected_price = base_price * (1 + avg_ret / 100)
+    upper_price = base_price * (1 + avg_up / 100)
+    lower_price = base_price * (1 + avg_down / 100)
+
+    x = [last_date, end_date]
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=[base_price, expected_price],
+            mode="lines+markers",
+            name="20일 예상 평균경로",
+            line=dict(dash="dash", width=3),
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=[base_price, upper_price],
+            mode="lines",
+            name="20일 상단 시나리오",
+            line=dict(dash="dot"),
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=[base_price, lower_price],
+            mode="lines",
+            name="20일 하단 시나리오",
+            line=dict(dash="dot"),
+        )
+    )
+    fig.add_vrect(
+        x0=last_date,
+        x1=end_date,
+        fillcolor="rgba(120, 120, 120, 0.08)",
+        line_width=0,
+        annotation_text="예상구간",
+        annotation_position="top left",
+    )
+
+
 def render_chart(row: pd.Series) -> None:
     symbol = str(row.get("symbol", ""))
     name = str(row.get("name", ""))
@@ -147,15 +209,17 @@ def render_chart(row: pd.Series) -> None:
         if str(row.get("final_verdict", "")) == "눌림대기" and pullback > 0:
             fig.add_hline(y=pullback, line_dash="dot", annotation_text="눌림 진입가", annotation_position="bottom right")
 
+        add_expected_path(fig, row, df)
+
         fig.update_layout(
-            title=f"{name} ({symbol}) · 최근 1년 일봉",
-            height=520,
+            title=f"{name} ({symbol}) · 최근 1년 일봉 + 20거래일 예상 경로",
+            height=560,
             xaxis_rangeslider_visible=False,
             margin=dict(l=10, r=10, t=55, b=10),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         )
         st.plotly_chart(fig, use_container_width=True)
-        st.caption("캔들 + 20/60/120일선 + 현재가/손절가/목표가 기준선입니다. 차트는 판단 보조용입니다.")
+        st.caption("예상 경로는 유사사례의 20거래일 평균수익·평균최대상승·평균최대하락을 현재가에 단순 투영한 것입니다. 예측 확정값이 아니라 시나리오 밴드입니다.")
 
 
 def action_text(row: pd.Series) -> str:
@@ -401,7 +465,7 @@ else:
     show_cols = [
         "final_verdict", "symbol", "name", "fast_score", "pattern", "close", "stop", "target",
         "rr", "pullback_entry", "pullback_rr", "pullback_gap_pct",
-        "similar_case_count", "avg_similarity", "win_rate20", "avg_ret20", "direction", "decision_reason",
+        "similar_case_count", "avg_similarity", "win_rate20", "avg_ret20", "avg_max_up20", "avg_max_down20", "direction", "decision_reason",
     ]
     show_cols = [c for c in show_cols if c in similar.columns]
     st.dataframe(similar[show_cols], use_container_width=True, hide_index=True)
