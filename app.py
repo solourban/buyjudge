@@ -171,6 +171,9 @@ with st.sidebar:
     st.caption(f"사용 파일: {universe_file}")
 
     period = st.selectbox("데이터 기간", ["2y", "5y", "10y", "max"], index=1)
+    max_candidates = st.selectbox("정밀분석 대상 수", [10, 15, 30, 50], index=2)
+    st.caption("최종 판정표는 전체 감시군이 아니라, 빠른 필터를 통과한 정밀분석 대상만 보여줍니다. 전체 목록은 하단 '빠른 필터 원본'에서 확인합니다.")
+
     refresh_cache = st.checkbox("캐시 무시하고 새로 받기", value=False)
     run = st.button("분석 실행", type="primary", use_container_width=True)
 
@@ -179,7 +182,17 @@ with st.sidebar:
     st.caption("GitHub 반영 → 앱 새로고침 → 분석 실행 → 화면 검토")
 
 if run:
-    args = [sys.executable, "main.py", "similar", "--period", period, "--universe", universe_file]
+    args = [
+        sys.executable,
+        "main.py",
+        "similar",
+        "--period",
+        period,
+        "--universe",
+        universe_file,
+        "--max-candidates",
+        str(max_candidates),
+    ]
     if refresh_cache:
         args.append("--refresh-cache")
 
@@ -223,11 +236,12 @@ else:
         if lower.empty:
             st.caption("위험차단/통계부족 없음")
         else:
-            for _, row in lower.head(20).iterrows():
+            for _, row in lower.head(50).iterrows():
                 render_card(row)
 
     st.divider()
     st.subheader("전체 요약표")
+    st.caption(f"현재 표시: 정밀분석 결과 {len(similar)}개. 전체 감시군 수는 하단 빠른 필터 원본에서 확인.")
     show_cols = [
         "final_verdict", "symbol", "name", "fast_score", "pattern", "close", "stop", "target",
         "rr", "pullback_entry", "pullback_rr", "pullback_gap_pct",
@@ -236,10 +250,11 @@ else:
     show_cols = [c for c in show_cols if c in similar.columns]
     st.dataframe(similar[show_cols], use_container_width=True, hide_index=True)
 
-with st.expander("빠른 필터 원본", expanded=False):
+with st.expander("빠른 필터 원본 · 전체 감시군", expanded=False):
     if fast.empty:
         st.caption("fast_scan.csv 없음")
     else:
+        st.caption(f"전체 빠른 필터 결과 {len(fast)}개. 여기에는 감시군 전체가 표시됩니다.")
         st.dataframe(fast, use_container_width=True, hide_index=True)
 
 with st.expander("데이터 상태", expanded=False):
