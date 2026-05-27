@@ -30,8 +30,10 @@ st.markdown(
     .decision-watch {border-left: 6px solid #ffd166; padding: 1rem; border-radius: 14px; background: rgba(255,209,102,.08);}
     .decision-block {border-left: 6px solid #ff6b6b; padding: 1rem; border-radius: 14px; background: rgba(255,107,107,.06);}
     .decision-weak {border-left: 6px solid #a78bfa; padding: 1rem; border-radius: 14px; background: rgba(167,139,250,.06);}
-    .small-muted {color:#9aa4b2; font-size:.9rem;}
     .big-action {font-size:1.15rem; font-weight:800; margin:.4rem 0 .8rem 0;}
+    .plan-box {padding: .9rem; border-radius: 12px; border: 1px solid rgba(255,255,255,.12); background: rgba(255,255,255,.04); margin-top: .6rem;}
+    .plan-title {font-weight: 900; font-size: 1.05rem; margin-bottom: .35rem;}
+    .plan-line {color:#cbd5e1; line-height:1.7;}
     </style>
     """,
     unsafe_allow_html=True,
@@ -109,6 +111,84 @@ def card_class(verdict: str) -> str:
     return "decision-weak"
 
 
+def build_trade_plan(row: pd.Series) -> dict:
+    symbol = str(row.get("symbol", ""))
+    verdict = str(row.get("final_verdict", ""))
+    close = n(row.get("close"))
+    stop = n(row.get("stop"))
+    target = n(row.get("target"))
+    pullback = n(row.get("pullback_entry"))
+
+    if close <= 0 or stop <= 0 or target <= 0:
+        return {"valid": False, "reason": "가격 데이터 부족"}
+
+    if verdict == "매수후보":
+        entry1 = close
+        entry2 = close * 0.97 if close * 0.97 > stop * 1.02 else 0
+        entry3 = close * 0.94 if close * 0.94 > stop * 1.02 else 0
+        headline = "현재가 기준 분할 진입 검토"
+        condition = "현재가보다 3% 이상 급등해 출발하면 추격하지 말고 다음 신호까지 대기."
+    elif verdict == "눌림대기" and pullback > 0:
+        entry1 = pullback
+        entry2 = (pullback + stop) / 2 if (pullback + stop) / 2 > stop * 1.02 else 0
+        entry3 = 0
+        headline = "눌림 가격 도달 전까지 매수 금지"
+        condition = f"{price_fmt(pullback, symbol)} 부근 도달 후 반등/거래대금 확인 시에만 검토."
+    elif verdict == "조건부관망":
+        entry1 = close
+        entry2 = close * 0.96 if close * 0.96 > stop * 1.02 else 0
+        entry3 = 0
+        headline = "관망 우선, 조건 개선 시 소액 검토"
+        condition = "거래대금 20일비, 유사사례, 추세 중 하나라도 개선될 때까지 비중 낮게 접근."
+    else:
+        return {"valid": False, "reason": "매매 플랜 생성 대상 아님"}
+
+    entries = [("1차", entry1, "40%"), ("2차", entry2, "30%"), ("3차", entry3, "30%")] 
+    active = [(label, price, ratio) for label, price, ratio in entries if price > 0]
+    avg_entry = sum(price * float(ratio.replace("%", "")) for _, price, ratio in active) / sum(float(ratio.replace("%", "")) for _, _, ratio in active)
+    target1 = avg_entry + (target - avg_entry) * 0.5
+    risk_pct = (avg_entry - stop) / avg_entry * 100 if avg_entry > stop else 0
+    reward_pct = (target - avg_entry) / avg_entry * 100 if target > avg_entry else 0
+    rr = reward_pct / risk_pct if risk_pct > 0 else 0
+
+    return {
+        "valid": True,
+        "symbol": symbol,
+        "headline": headline,
+        "condition": condition,
+        "entries": active,
+        "avg_entry": avg_entry,
+        "stop": stop,
+        "target1": target1,
+        "target2": target,
+        "risk_pct": risk_pct,
+        "reward_pct": reward_pct,
+        "rr": rr,
+    }
+
+
+def render_trade_plan(row: pd.Series) -> None:
+    plan = build_trade_plan(row)
+    if not plan.get("valid"):
+        return
+    symbol = plan["symbol"]
+
+    with st.expander("분할매수·손절·익절 플랜", expanded=True):
+        st.markdown(f"<div class='plan-box'><div class='plan-title'>{plan['headline']}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='plan-line'>조건: {plan['condition']}</div>", unsafe_allow_html=True)
+        for label, price, ratio in plan["entries"]:
+            st.markdown(f"<div class='plan-line'>{label} 진입: {price_fmt(price, symbol)} · 비중 {ratio}</div>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div class='plan-line'>평균단가 기준: {price_fmt(plan['avg_entry'], symbol)} · 손절 {price_fmt(plan['stop'], symbol)} · 1차 익절 {price_fmt(plan['target1'], symbol)} · 2차 익절 {price_fmt(plan['target2'], symbol)}</div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f"<div class='plan-line'>예상 손실폭 {plan['risk_pct']:.2f}% · 목표수익 {plan['reward_pct']:.2f}% · 플랜 손익비 {plan['rr']:.2f}</div></div>",
+            unsafe_allow_html=True,
+        )
+        st.caption("이 플랜은 자동 주문이 아니라 판단 보조용입니다. 실제 진입 전 호가·체결강도·당일 시장 흐름 확인 필요.")
+
+
 def render_card(row: pd.Series) -> None:
     symbol = str(row.get("symbol", ""))
     name = str(row.get("name", ""))
@@ -136,6 +216,8 @@ def render_card(row: pd.Series) -> None:
         q1.metric("눌림 진입가", price_fmt(row.get("pullback_entry"), symbol))
         q2.metric("눌림 손익비", f"{n(row.get('pullback_rr')):.2f}")
         q3.metric("현재가 대비 눌림폭", pct_fmt(row.get("pullback_gap_pct")))
+
+    render_trade_plan(row)
 
     st.caption(str(row.get("decision_reason", "")))
     with st.expander("대표 유사사례 / 차단사유"):
