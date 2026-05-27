@@ -14,7 +14,9 @@ import subprocess
 import sys
 
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
+import yfinance as yf
 
 OUTPUT_DIR = Path("outputs")
 
@@ -85,6 +87,77 @@ def pct_fmt(value, signed: bool = False) -> str:
     return f"{sign}{v:.2f}%"
 
 
+@st.cache_data(ttl=60 * 30, show_spinner=False)
+def load_chart_data(symbol: str, period: str) -> pd.DataFrame:
+    df = yf.download(symbol, period=period, interval="1d", auto_adjust=True, progress=False, threads=False)
+    if df is None or df.empty:
+        return pd.DataFrame()
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = [c[0] for c in df.columns]
+    df = df.rename(columns={c: str(c).lower() for c in df.columns})
+    need = ["open", "high", "low", "close", "volume"]
+    if any(c not in df.columns for c in need):
+        return pd.DataFrame()
+    df = df[need].dropna().copy()
+    df.index = pd.to_datetime(df.index)
+    df["ma20"] = df["close"].rolling(20).mean()
+    df["ma60"] = df["close"].rolling(60).mean()
+    df["ma120"] = df["close"].rolling(120).mean()
+    return df.tail(180)
+
+
+def render_chart(row: pd.Series) -> None:
+    symbol = str(row.get("symbol", ""))
+    name = str(row.get("name", ""))
+    if not symbol:
+        return
+
+    with st.expander("차트 보기", expanded=False):
+        df = load_chart_data(symbol, "1y")
+        if df.empty:
+            st.caption("차트 데이터를 불러오지 못했습니다.")
+            return
+
+        fig = go.Figure()
+        fig.add_trace(
+            go.Candlestick(
+                x=df.index,
+                open=df["open"],
+                high=df["high"],
+                low=df["low"],
+                close=df["close"],
+                name="일봉",
+            )
+        )
+        for ma in ["ma20", "ma60", "ma120"]:
+            if ma in df.columns:
+                fig.add_trace(go.Scatter(x=df.index, y=df[ma], mode="lines", name=ma.upper()))
+
+        close = n(row.get("close"))
+        stop = n(row.get("stop"))
+        target = n(row.get("target"))
+        pullback = n(row.get("pullback_entry"))
+
+        if close > 0:
+            fig.add_hline(y=close, line_dash="dot", annotation_text="현재가", annotation_position="top left")
+        if stop > 0:
+            fig.add_hline(y=stop, line_dash="dash", annotation_text="손절가", annotation_position="bottom left")
+        if target > 0:
+            fig.add_hline(y=target, line_dash="dash", annotation_text="목표가", annotation_position="top right")
+        if str(row.get("final_verdict", "")) == "눌림대기" and pullback > 0:
+            fig.add_hline(y=pullback, line_dash="dot", annotation_text="눌림 진입가", annotation_position="bottom right")
+
+        fig.update_layout(
+            title=f"{name} ({symbol}) · 최근 1년 일봉",
+            height=520,
+            xaxis_rangeslider_visible=False,
+            margin=dict(l=10, r=10, t=55, b=10),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption("캔들 + 20/60/120일선 + 현재가/손절가/목표가 기준선입니다. 차트는 판단 보조용입니다.")
+
+
 def action_text(row: pd.Series) -> str:
     verdict = str(row.get("final_verdict", ""))
     symbol = str(row.get("symbol", ""))
@@ -143,7 +216,7 @@ def build_trade_plan(row: pd.Series) -> dict:
     else:
         return {"valid": False, "reason": "매매 플랜 생성 대상 아님"}
 
-    entries = [("1차", entry1, "40%"), ("2차", entry2, "30%"), ("3차", entry3, "30%")] 
+    entries = [("1차", entry1, "40%"), ("2차", entry2, "30%"), ("3차", entry3, "30%")]
     active = [(label, price, ratio) for label, price, ratio in entries if price > 0]
     avg_entry = sum(price * float(ratio.replace("%", "")) for _, price, ratio in active) / sum(float(ratio.replace("%", "")) for _, _, ratio in active)
     target1 = avg_entry + (target - avg_entry) * 0.5
@@ -217,6 +290,7 @@ def render_card(row: pd.Series) -> None:
         q2.metric("눌림 손익비", f"{n(row.get('pullback_rr')):.2f}")
         q3.metric("현재가 대비 눌림폭", pct_fmt(row.get("pullback_gap_pct")))
 
+    render_chart(row)
     render_trade_plan(row)
 
     st.caption(str(row.get("decision_reason", "")))
