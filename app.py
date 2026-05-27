@@ -131,7 +131,6 @@ def render_card(row: pd.Series) -> None:
     p3.metric("목표가", price_fmt(row.get("target"), symbol))
     p4.metric("거래대금 20일비", f"{n(row.get('trading_value_ratio20')):.2f}배")
 
-    # 매수후보 카드에는 눌림 진입가를 숨긴다. 같이 보이면 '지금 가능'과 '눌림대기'가 섞여 헷갈린다.
     if verdict == "눌림대기":
         q1, q2, q3 = st.columns(3)
         q1.metric("눌림 진입가", price_fmt(row.get("pullback_entry"), symbol))
@@ -163,6 +162,14 @@ def prepare_df(df: pd.DataFrame) -> pd.DataFrame:
 
 with st.sidebar:
     st.header("실행")
+    universe_map = {
+        "기본 감시군 · 빠름": "universe_core.csv",
+        "확장 감시군 · 느림": "universe_extended.csv",
+    }
+    universe_label = st.selectbox("감시군", list(universe_map.keys()), index=0)
+    universe_file = universe_map[universe_label]
+    st.caption(f"사용 파일: {universe_file}")
+
     period = st.selectbox("데이터 기간", ["2y", "5y", "10y", "max"], index=1)
     refresh_cache = st.checkbox("캐시 무시하고 새로 받기", value=False)
     run = st.button("분석 실행", type="primary", use_container_width=True)
@@ -172,11 +179,11 @@ with st.sidebar:
     st.caption("GitHub 반영 → 앱 새로고침 → 분석 실행 → 화면 검토")
 
 if run:
-    args = [sys.executable, "main.py", "similar", "--period", period]
+    args = [sys.executable, "main.py", "similar", "--period", period, "--universe", universe_file]
     if refresh_cache:
         args.append("--refresh-cache")
 
-    with st.spinner("분석 중입니다. 처음 실행은 데이터 다운로드 때문에 시간이 걸릴 수 있습니다."):
+    with st.spinner("분석 중입니다. 확장 감시군이나 5y 이상은 시간이 걸릴 수 있습니다."):
         code, log = run_command(args)
 
     if code == 0:
