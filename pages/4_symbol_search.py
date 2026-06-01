@@ -7,7 +7,7 @@ import yfinance as yf
 
 st.set_page_config(page_title="BuyJudge Search", page_icon="🔎", layout="wide")
 st.title("🔎 Symbol Search")
-st.caption("분석 결과, 빠른 필터, 감시군에서 종목명/티커를 검색합니다. 결과에 없어도 티커를 직접 입력하면 간단 차트를 불러옵니다.")
+st.caption("종목명/티커 검색, 장기 차트, 분석 결과가 있는 종목의 예상 경로를 같이 확인합니다.")
 
 OUTPUT = Path("outputs")
 
@@ -56,19 +56,13 @@ def load_all():
             df = df.copy()
             df["source"] = source
             frames.append(df)
-    if not frames:
-        return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True, sort=False)
-
-
-def norm_text(x):
-    return str(x).lower().strip()
+    return pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
 
 
 def search_df(df, q):
     if df.empty or not q:
         return pd.DataFrame()
-    q = norm_text(q)
+    q = str(q).lower().strip()
     mask = pd.Series(False, index=df.index)
     for col in ["symbol", "ticker", "name", "종목", "theme", "market", "asset_type"]:
         if col in df.columns:
@@ -77,9 +71,9 @@ def search_df(df, q):
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def chart_data(symbol):
+def chart_data(symbol, period):
     try:
-        df = yf.download(symbol, period="1y", interval="1d", auto_adjust=True, progress=False, threads=False)
+        df = yf.download(symbol, period=period, interval="1d", auto_adjust=True, progress=False, threads=False)
         if df is None or df.empty:
             return pd.DataFrame()
         if isinstance(df.columns, pd.MultiIndex):
@@ -90,28 +84,89 @@ def chart_data(symbol):
             return pd.DataFrame()
         df = df[need].dropna().copy()
         df.index = pd.to_datetime(df.index)
+        df = df.sort_index()
         df["ma20"] = df["close"].rolling(20).mean()
         df["ma60"] = df["close"].rolling(60).mean()
         df["ma120"] = df["close"].rolling(120).mean()
-        return df.tail(180)
+        df["ma240"] = df["close"].rolling(240).mean()
+        return df
     except Exception:
         return pd.DataFrame()
 
 
-def render_chart(symbol):
-    df = chart_data(symbol)
+def add_expected_path(fig, row, df):
+    if row is None or df.empty:
+        return False
+    cases = int(num(row.get("similar_case_count")))
+    base = num(row.get("close")) or num(df["close"].iloc[-1])
+    if cases <= 0 or base <= 0:
+        return False
+
+    last = df.index[-1]
+    future = pd.bdate_range(last, periods=22)[1:]
+    if len(future) == 0:
+        return False
+    end = future[-1]
+
+    avg_ret = num(row.get("avg_ret20"))
+    avg_up = num(row.get("avg_max_up20"))
+    avg_down = num(row.get("avg_max_down20"))
+
+    fig.add_trace(go.Scatter(x=[last, end], y=[base, base * (1 + avg_ret / 100)], mode="lines+markers", name="20일 예상 평균", line=dict(dash="dash", width=3)))
+    fig.add_trace(go.Scatter(x=[last, end], y=[base, base * (1 + avg_up / 100)], mode="lines", name="20일 상단", line=dict(dash="dot")))
+    fig.add_trace(go.Scatter(x=[last, end], y=[base, base * (1 + avg_down / 100)], mode="lines", name="20일 하단", line=dict(dash="dot")))
+    fig.add_vrect(x0=last, x1=end, fillcolor="rgba(120,120,120,.08)", line_width=0, annotation_text="예상구간", annotation_position="top left")
+    return True
+
+
+def find_similar_row(symbol):
+    sim = read(OUTPUT / "similar_scan.csv")
+    if sim.empty or "symbol" not in sim.columns:
+        return None
+    m = sim[sim["symbol"].astype(str).str.upper() == str(symbol).upper()]
+    if m.empty:
+        return None
+    return m.iloc[0]
+
+
+def render_chart(symbol, period, row=None):
+    df = chart_data(symbol, period)
     if df.empty:
         st.warning("차트 데이터를 불러오지 못했습니다. 국내 종목은 .KS 또는 .KQ를 붙여보세요. 예: 005930.KS")
         return
+
     fig = go.Figure()
-    fig.add_trace(go.Candlestick(x=df.index, open=df["open"], high=df["high"], low=df["low"], close=df["close"], name="price"))
-    for ma in ["ma20", "ma60", "ma120"]:
-        fig.add_trace(go.Scatter(x=df.index, y=df[ma], mode="lines", name=ma.upper()))
-    fig.update_layout(title=f"{symbol} 1Y chart", height=520, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=50, b=10))
+    fig.add_trace(go.Candlestick(x=df.index, open=df["open"], high=df["high"], low=df["low"], close=df["close"], name="일봉"))
+    for ma in ["ma20", "ma60", "ma120", "ma240"]:
+        if ma in df.columns:
+            fig.add_trace(go.Scatter(x=df.index, y=df[ma], mode="lines", name=ma.upper()))
+
+    if row is not None:
+        close = num(row.get("close"))
+        stop = num(row.get("stop"))
+        target = num(row.get("target"))
+        pullback = num(row.get("pullback_entry"))
+        if close > 0:
+            fig.add_hline(y=close, line_dash="dot", annotation_text="분석 현재가", annotation_position="top left")
+        if stop > 0:
+            fig.add_hline(y=stop, line_dash="dash", annotation_text="손절가", annotation_position="bottom left")
+        if target > 0:
+            fig.add_hline(y=target, line_dash="dash", annotation_text="목표가", annotation_position="top right")
+        if pullback > 0:
+            fig.add_hline(y=pullback, line_dash="dot", annotation_text="눌림가", annotation_position="bottom right")
+
+    has_expected = add_expected_path(fig, row, df)
+    fig.update_layout(title=f"{symbol} · {period} chart", height=560, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=50, b=10))
     st.plotly_chart(fig, use_container_width=True)
+
+    if has_expected:
+        st.caption("예상 경로는 정밀분석 결과의 유사사례 20거래일 평균/상단/하단 시나리오입니다.")
+    else:
+        st.caption("예상 경로 없음: 이 종목이 정밀분석 결과(similar_scan.csv)에 없거나 유사사례 통계가 부족합니다.")
 
 
 all_df = load_all()
+period = st.selectbox("차트 기간", ["6mo", "1y", "2y", "5y", "10y", "max"], index=3)
 query = st.text_input("종목명 또는 티커 검색", placeholder="예: 삼성전기, 하이닉스, NVDA, 005930.KS, QQQ")
 
 if query:
@@ -122,25 +177,37 @@ if query:
     else:
         preferred = [
             "source", "final_verdict", "symbol", "name", "asset_type", "market", "theme", "fast_score", "pattern",
-            "close", "stop", "target", "rr", "pullback_entry", "win_rate20", "avg_ret20", "similar_case_count",
+            "close", "stop", "target", "rr", "pullback_entry", "win_rate20", "avg_ret20", "avg_max_up20", "avg_max_down20", "similar_case_count",
             "decision_reason",
         ]
         cols = [c for c in preferred if c in result.columns]
         extra = [c for c in result.columns if c not in cols]
         st.dataframe(result[cols + extra[:5]], use_container_width=True, hide_index=True)
 
-        symbols = []
-        if "symbol" in result.columns:
-            symbols = result["symbol"].dropna().astype(str).unique().tolist()
+        symbols = result["symbol"].dropna().astype(str).unique().tolist() if "symbol" in result.columns else []
         if symbols:
             selected = st.selectbox("차트 볼 종목", symbols)
-            render_chart(selected)
+            row = find_similar_row(selected)
+            render_chart(selected, period, row)
 
 st.divider()
 st.subheader("직접 티커 차트")
 direct = st.text_input("직접 티커 입력", placeholder="예: NVDA, TSLA, MU, 005930.KS, 000660.KS", key="direct_symbol")
 if direct:
-    render_chart(direct.strip())
+    sym = direct.strip()
+    row = find_similar_row(sym)
+    render_chart(sym, period, row)
+
+with st.expander("왜 예상 경로가 안 나올 수 있나?"):
+    st.markdown(
+        """
+- 검색 차트는 기본적으로 yfinance 가격 차트입니다.
+- **예상 경로는 정밀분석 결과에 있는 종목만** 표시됩니다.
+- 즉, 메인에서 분석 실행 → `similar_scan.csv`에 포함 → 유사사례 통계 존재 순서가 필요합니다.
+- 감시군에는 있지만 정밀분석 대상이 아니었던 종목은 가격 차트만 표시됩니다.
+- 차트 기간은 위의 `차트 기간`에서 6개월~최대 기간까지 바꿀 수 있습니다.
+        """
+    )
 
 with st.expander("티커 입력 예시"):
     st.markdown(
