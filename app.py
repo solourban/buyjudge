@@ -84,7 +84,8 @@ def normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     df["ma20"] = df["close"].rolling(20).mean()
     df["ma60"] = df["close"].rolling(60).mean()
     df["ma120"] = df["close"].rolling(120).mean()
-    return df.tail(180)
+    df["ma240"] = df["close"].rolling(240).mean()
+    return df
 
 
 def cache_key(symbol: str) -> str:
@@ -106,17 +107,19 @@ def load_from_cache(symbol: str) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def load_chart_data(symbol: str, period: str = "1y") -> tuple[pd.DataFrame, str]:
-    cached = load_from_cache(symbol)
-    if not cached.empty:
-        return cached, "분석 캐시"
+def load_chart_data(symbol: str, period: str) -> tuple[pd.DataFrame, str]:
+    # 긴 차트가 필요하므로 yfinance에서 요청 기간을 먼저 받는다.
+    # 국내 ETF/일부 종목이 실패하면 분석 실행 때 저장된 data_cache를 fallback으로 쓴다.
     try:
         raw = yf.download(symbol, period=period, interval="1d", auto_adjust=True, progress=False, threads=False)
         out = normalize_ohlcv(raw)
         if not out.empty:
-            return out, "yfinance"
+            return out, f"yfinance · {period}"
     except Exception:
         pass
+    cached = load_from_cache(symbol)
+    if not cached.empty:
+        return cached, "분석 캐시"
     return pd.DataFrame(), "실패"
 
 
@@ -141,19 +144,19 @@ def add_expected_path(fig: go.Figure, row: pd.Series, df: pd.DataFrame) -> None:
     fig.add_vrect(x0=last, x1=end, fillcolor="rgba(120,120,120,.08)", line_width=0, annotation_text="예상구간", annotation_position="top left")
 
 
-def render_chart(row: pd.Series) -> None:
+def render_chart(row: pd.Series, chart_period: str) -> None:
     symbol = str(row.get("symbol", ""))
     name = str(row.get("name", ""))
     if not symbol:
         return
     with st.expander("차트 보기", expanded=False):
-        df, source = load_chart_data(symbol)
+        df, source = load_chart_data(symbol, chart_period)
         if df.empty:
             st.caption("차트 데이터를 불러오지 못했습니다. 분석 실행 후 다시 펼쳐보세요.")
             return
         fig = go.Figure()
         fig.add_trace(go.Candlestick(x=df.index, open=df["open"], high=df["high"], low=df["low"], close=df["close"], name="일봉"))
-        for ma in ["ma20", "ma60", "ma120"]:
+        for ma in ["ma20", "ma60", "ma120", "ma240"]:
             fig.add_trace(go.Scatter(x=df.index, y=df[ma], mode="lines", name=ma.upper()))
         close, stop, target, pull = n(row.get("close")), n(row.get("stop")), n(row.get("target")), n(row.get("pullback_entry"))
         if close > 0:
@@ -165,9 +168,17 @@ def render_chart(row: pd.Series) -> None:
         if str(row.get("final_verdict", "")) == "눌림대기" and pull > 0:
             fig.add_hline(y=pull, line_dash="dot", annotation_text="눌림 진입가", annotation_position="bottom right")
         add_expected_path(fig, row, df)
-        fig.update_layout(title=f"{name} ({symbol}) · 차트 + 20거래일 예상 경로", height=560, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=55, b=10), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+        first = df.index.min().strftime("%Y-%m-%d")
+        last = df.index.max().strftime("%Y-%m-%d")
+        fig.update_layout(
+            title=f"{name} ({symbol}) · {chart_period} 차트 + 20거래일 예상 경로",
+            height=620,
+            xaxis_rangeslider_visible=True,
+            margin=dict(l=10, r=10, t=55, b=10),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
         st.plotly_chart(fig, use_container_width=True)
-        st.caption(f"데이터 소스: {source}. 예상 경로는 유사사례의 20거래일 평균/상단/하단 시나리오입니다.")
+        st.caption(f"데이터 소스: {source}. 표시 구간: {first} ~ {last}. 예상 경로는 유사사례 20거래일 평균/상단/하단 시나리오입니다.")
 
 
 def action_text(row: pd.Series) -> str:
@@ -233,7 +244,7 @@ def render_plan(row: pd.Series) -> None:
         st.caption("판단 보조용 플랜입니다. 실제 진입 전 당일 시장 흐름 확인 필요.")
 
 
-def render_card(row: pd.Series) -> None:
+def render_card(row: pd.Series, chart_period: str) -> None:
     symbol, name, verdict = str(row.get("symbol", "")), str(row.get("name", "")), str(row.get("final_verdict", ""))
     st.markdown(f"<div class='{card_class(verdict)}'>", unsafe_allow_html=True)
     st.markdown(f"### {verdict} · {name} ({symbol})")
@@ -253,7 +264,7 @@ def render_card(row: pd.Series) -> None:
         q1.metric("눌림 진입가", price_fmt(row.get("pullback_entry"), symbol))
         q2.metric("눌림 손익비", f"{n(row.get('pullback_rr')):.2f}")
         q3.metric("현재가 대비 눌림폭", pct_fmt(row.get("pullback_gap_pct")))
-    render_chart(row)
+    render_chart(row, chart_period)
     render_plan(row)
     st.caption(str(row.get("decision_reason", "")))
     with st.expander("대표 유사사례 / 차단사유"):
@@ -281,6 +292,7 @@ with st.sidebar:
     universe_file = universe_map[universe_label]
     st.caption(f"사용 파일: {universe_file}")
     period = st.selectbox("데이터 기간", ["2y", "5y", "10y", "max"], index=1)
+    chart_period = st.selectbox("차트 기간", ["6mo", "1y", "2y", "5y", "10y", "max"], index=3)
     max_candidates = st.selectbox("정밀분석 대상 수", [10, 15, 30, 50], index=2)
     st.caption("최종 판정표는 빠른 필터를 통과한 정밀분석 대상만 보여줍니다. 전체 목록은 하단 빠른 필터 원본에서 확인합니다.")
     refresh_cache = st.checkbox("캐시 무시하고 새로 받기", value=False)
@@ -319,14 +331,14 @@ else:
         st.caption("오늘 우선 검토할 후보 없음")
     else:
         for _, row in focus.iterrows():
-            render_card(row)
+            render_card(row, chart_period)
     with st.expander("위험차단 / 통계부족", expanded=False):
         lower = similar[similar["final_verdict"].isin(["위험차단", "통계부족"])]
         if lower.empty:
             st.caption("위험차단/통계부족 없음")
         else:
             for _, row in lower.head(50).iterrows():
-                render_card(row)
+                render_card(row, chart_period)
     st.divider()
     st.subheader("전체 요약표")
     st.caption(f"현재 표시: 정밀분석 결과 {len(similar)}개. 전체 감시군 수는 하단 빠른 필터 원본에서 확인.")
