@@ -108,8 +108,6 @@ def load_from_cache(symbol: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def load_chart_data(symbol: str, period: str) -> tuple[pd.DataFrame, str]:
-    # 긴 차트가 필요하므로 yfinance에서 요청 기간을 먼저 받는다.
-    # 국내 ETF/일부 종목이 실패하면 분석 실행 때 저장된 data_cache를 fallback으로 쓴다.
     try:
         raw = yf.download(symbol, period=period, interval="1d", auto_adjust=True, progress=False, threads=False)
         out = normalize_ohlcv(raw)
