@@ -124,16 +124,7 @@ def load_chart_data(symbol: str, period: str) -> tuple[pd.DataFrame, str]:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_market_strip() -> pd.DataFrame:
-    items = [
-        ("S&P500", "^GSPC"),
-        ("Nasdaq", "^IXIC"),
-        ("VIX", "^VIX"),
-        ("US10Y", "^TNX"),
-        ("USD/KRW", "KRW=X"),
-        ("WTI", "CL=F"),
-        ("Gold", "GC=F"),
-        ("BTC", "BTC-USD"),
-    ]
+    items = [("S&P500", "^GSPC"), ("Nasdaq", "^IXIC"), ("VIX", "^VIX"), ("US10Y", "^TNX"), ("USD/KRW", "KRW=X"), ("WTI", "CL=F"), ("Gold", "GC=F"), ("BTC", "BTC-USD")]
     rows = []
     for name, symbol in items:
         try:
