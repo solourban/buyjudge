@@ -24,6 +24,7 @@ st.markdown(
     .decision-block{border-left:6px solid #ff6b6b;padding:1rem;border-radius:14px;background:rgba(255,107,107,.06)}
     .decision-weak{border-left:6px solid #a78bfa;padding:1rem;border-radius:14px;background:rgba(167,139,250,.06)}
     .big-action{font-size:1.15rem;font-weight:800;margin:.4rem 0 .8rem 0}.plan-box{padding:.9rem;border-radius:12px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.04);margin-top:.6rem}.plan-title{font-weight:900;font-size:1.05rem;margin-bottom:.35rem}.plan-line{color:#cbd5e1;line-height:1.7}
+    .market-box{padding:.85rem;border-radius:14px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.035);margin:.6rem 0 1rem 0}.market-title{font-weight:900;margin-bottom:.4rem}.market-note{color:#9aa4b2;font-size:.85rem;margin-top:.2rem}
     </style>
     """,
     unsafe_allow_html=True,
@@ -121,6 +122,94 @@ def load_chart_data(symbol: str, period: str) -> tuple[pd.DataFrame, str]:
     return pd.DataFrame(), "실패"
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def load_market_strip() -> pd.DataFrame:
+    items = [
+        ("S&P500", "^GSPC"),
+        ("Nasdaq", "^IXIC"),
+        ("VIX", "^VIX"),
+        ("US10Y", "^TNX"),
+        ("USD/KRW", "KRW=X"),
+        ("WTI", "CL=F"),
+        ("Gold", "GC=F"),
+        ("BTC", "BTC-USD"),
+    ]
+    rows = []
+    for name, symbol in items:
+        try:
+            raw = yf.download(symbol, period="5d", interval="1d", auto_adjust=True, progress=False, threads=False)
+            if raw is None or raw.empty:
+                rows.append({"name": name, "symbol": symbol, "last": None, "change_pct": None, "status": "데이터 없음"})
+                continue
+            if isinstance(raw.columns, pd.MultiIndex):
+                raw.columns = [c[0] for c in raw.columns]
+            raw = raw.rename(columns={c: str(c).lower() for c in raw.columns}).dropna(subset=["close"])
+            if len(raw) < 2:
+                rows.append({"name": name, "symbol": symbol, "last": None, "change_pct": None, "status": "데이터 부족"})
+                continue
+            last = float(raw["close"].iloc[-1])
+            prev = float(raw["close"].iloc[-2])
+            rows.append({"name": name, "symbol": symbol, "last": last, "change_pct": (last / prev - 1) * 100 if prev else 0, "status": "지연/공개 데이터"})
+        except Exception as e:
+            rows.append({"name": name, "symbol": symbol, "last": None, "change_pct": None, "status": f"불러오기 실패: {type(e).__name__}"})
+    return pd.DataFrame(rows)
+
+
+def fmt_market_value(symbol: str, value) -> str:
+    if value is None or pd.isna(value):
+        return "데이터 없음"
+    if symbol == "^TNX":
+        return f"{float(value):.2f}"
+    if symbol == "KRW=X":
+        return f"₩{float(value):,.2f}"
+    if symbol in ["CL=F", "GC=F", "BTC-USD"]:
+        return f"${float(value):,.2f}"
+    return f"{float(value):,.2f}"
+
+
+def market_regime(df: pd.DataFrame) -> tuple[str, str]:
+    if df.empty:
+        return "판단 불가", "시장 데이터 없음"
+    lookup = df.set_index("symbol").to_dict("index")
+    score = 0
+    reasons = []
+    if n(lookup.get("^GSPC", {}).get("change_pct")) > 0:
+        score += 1
+        reasons.append("S&P 상승")
+    if n(lookup.get("^IXIC", {}).get("change_pct")) > 0:
+        score += 1
+        reasons.append("나스닥 상승")
+    vix = n(lookup.get("^VIX", {}).get("last"), 99)
+    if vix < 18:
+        score += 1
+        reasons.append("VIX 안정")
+    elif vix > 25:
+        score -= 2
+        reasons.append("VIX 고위험")
+    if n(lookup.get("^TNX", {}).get("change_pct")) > 1:
+        score -= 1
+        reasons.append("금리 상승 압력")
+    if score >= 2:
+        return "Risk-On 우세", " / ".join(reasons)
+    if score <= -1:
+        return "Risk-Off 주의", " / ".join(reasons)
+    return "중립/혼조", " / ".join(reasons) if reasons else "뚜렷한 방향성 부족"
+
+
+def render_market_strip() -> None:
+    df = load_market_strip()
+    regime, reason = market_regime(df)
+    st.markdown(f"<div class='market-box'><div class='market-title'>🌐 Market Pulse · {regime}</div><div class='market-note'>{reason}</div></div>", unsafe_allow_html=True)
+    if df.empty:
+        st.caption("시장 데이터 없음")
+        return
+    cols = st.columns(min(8, len(df)))
+    for i, (_, r) in enumerate(df.iterrows()):
+        delta = None if pd.isna(r.get("change_pct")) else f"{r['change_pct']:+.2f}%"
+        cols[i % len(cols)].metric(r["name"], fmt_market_value(r["symbol"], r.get("last")), delta)
+    st.caption("시장 요약은 yfinance 공개·지연 데이터 기준입니다. 자세한 화면은 왼쪽 Market Pulse 페이지에서 확인.")
+
+
 def add_expected_path(fig: go.Figure, row: pd.Series, df: pd.DataFrame) -> None:
     if df.empty:
         return
@@ -168,13 +257,7 @@ def render_chart(row: pd.Series, chart_period: str) -> None:
         add_expected_path(fig, row, df)
         first = df.index.min().strftime("%Y-%m-%d")
         last = df.index.max().strftime("%Y-%m-%d")
-        fig.update_layout(
-            title=f"{name} ({symbol}) · {chart_period} 차트 + 20거래일 예상 경로",
-            height=620,
-            xaxis_rangeslider_visible=True,
-            margin=dict(l=10, r=10, t=55, b=10),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        )
+        fig.update_layout(title=f"{name} ({symbol}) · {chart_period} 차트 + 20거래일 예상 경로", height=620, xaxis_rangeslider_visible=True, margin=dict(l=10, r=10, t=55, b=10), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
         st.plotly_chart(fig, use_container_width=True)
         st.caption(f"데이터 소스: {source}. 표시 구간: {first} ~ {last}. 예상 경로는 유사사례 20거래일 평균/상단/하단 시나리오입니다.")
 
@@ -282,6 +365,8 @@ def prepare_df(df: pd.DataFrame) -> pd.DataFrame:
     out["fast_score"] = pd.to_numeric(out.get("fast_score", 0), errors="coerce").fillna(0)
     return out.sort_values(["_order", "fast_score"], ascending=[True, False]).drop(columns=["_order"])
 
+
+render_market_strip()
 
 with st.sidebar:
     st.header("실행")
