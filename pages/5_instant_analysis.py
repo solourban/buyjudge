@@ -15,6 +15,7 @@ st.caption("검색만 하지 말고, 원하는 티커를 임시 감시군으로 
 OUTPUT = Path("outputs")
 TEMP_UNIVERSE = Path("manual_universe.csv")
 MANUAL_SCAN = OUTPUT / "manual_scan.csv"
+RUN_TIMEOUT_SECONDS = 240
 
 
 def num(x, default=0.0):
@@ -40,12 +41,16 @@ def price_fmt(value, symbol):
 
 def parse_lines(text):
     rows = []
+    seen = set()
     for raw in text.splitlines():
         line = raw.strip()
         if not line:
             continue
         parts = [p.strip() for p in line.replace("\t", ",").split(",") if p.strip()]
-        symbol = parts[0]
+        symbol = parts[0].upper()
+        if symbol in seen:
+            continue
+        seen.add(symbol)
         name = parts[1] if len(parts) >= 2 else symbol
         market = "KR" if is_kr(symbol) else "US"
         rows.append({
@@ -92,13 +97,36 @@ def run_manual_analysis(rows, period, max_candidates, top_n, min_similarity, min
         "--min-similarity", str(min_similarity),
         "--min-cases", str(min_cases),
     ]
-    proc = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace")
+
     manual = pd.DataFrame()
-    if (OUTPUT / "similar_scan.csv").exists():
-        manual = pd.read_csv(OUTPUT / "similar_scan.csv")
-        manual.to_csv(MANUAL_SCAN, index=False, encoding="utf-8-sig")
-    restore_outputs(backed)
-    return proc.returncode, (proc.stdout or "") + "\n" + (proc.stderr or ""), manual
+    code = 1
+    log = ""
+    try:
+        proc = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=RUN_TIMEOUT_SECONDS,
+        )
+        code = proc.returncode
+        log = (proc.stdout or "") + "\n" + (proc.stderr or "")
+        if (OUTPUT / "similar_scan.csv").exists():
+            manual = pd.read_csv(OUTPUT / "similar_scan.csv")
+            manual.to_csv(MANUAL_SCAN, index=False, encoding="utf-8-sig")
+    except subprocess.TimeoutExpired as exc:
+        code = 124
+        partial_out = exc.stdout if isinstance(exc.stdout, str) else ""
+        partial_err = exc.stderr if isinstance(exc.stderr, str) else ""
+        log = partial_out + "\n" + partial_err + f"\n[TIMEOUT] {RUN_TIMEOUT_SECONDS}초를 초과해 즉석 분석을 중단했습니다. 종목 수/기간/유사사례 수를 줄여보세요."
+    except Exception as exc:
+        code = 1
+        log = f"[ERROR] {type(exc).__name__}: {exc}"
+    finally:
+        restore_outputs(backed)
+        TEMP_UNIVERSE.unlink(missing_ok=True)
+    return code, log, manual
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -160,7 +188,7 @@ def render_chart(row, period):
         if v > 0:
             fig.add_hline(y=v, line_dash="dash" if key in ["stop", "target"] else "dot", annotation_text=label)
     add_expected(fig, row, df)
-    fig.update_layout(title=f"{row.get('name', symbol)} ({symbol}) · 즉석분석 차트", height=560, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=50, b=10))
+    fig.update_layout(title=f"{row.get('name', symbol)} ({symbol}) · 즉석분석 차트", height=560, xaxis_rangeslider_visible=True, margin=dict(l=10, r=10, t=50, b=10))
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -179,6 +207,7 @@ text = st.text_area(
 )
 
 rows = parse_lines(text)
+st.caption(f"분석 대상: {len(rows)}개 / 즉석 분석 제한시간: {RUN_TIMEOUT_SECONDS}초")
 run = st.button("즉석 정밀분석 실행", type="primary")
 
 if run:
@@ -212,7 +241,8 @@ else:
 with st.expander("주의"):
     st.markdown("""
 - 이 페이지는 입력한 티커만 임시 감시군으로 만들어 `main.py similar`를 실행합니다.
-- 메인 분석 결과는 백업 후 복구하고, 즉석 결과는 `outputs/manual_scan.csv`에 따로 저장합니다.
+- 실행 중 오류가 나도 메인 분석 결과를 복구하도록 `try/finally`로 보호합니다.
+- 즉석 결과는 `outputs/manual_scan.csv`에 따로 저장합니다.
 - 예상 경로는 즉석 유사사례 통계를 기준으로 그립니다.
 - 뉴스/공시/실적은 아직 반영하지 않습니다.
     """)
